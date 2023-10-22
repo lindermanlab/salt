@@ -1,0 +1,19 @@
+title: Switching Autoregressive Low-Rank Tensor Models
+repository-code: https://github.com/lindermanlab/salt
+version: 1.0.0
+date-released: 2023-12-08
+message: If you use this software, please cite it as below.
+authors:
+  - given-names: Hyun Dong
+    family-names: Lee
+    affiliation: Department of Computer Science, Stanford University
+  - given-names: Andrew
+    family-names: Warrington
+    affiliation: Department of Statistics, Stanford University
+  - given-names: Josh
+    family-names: Glaser
+    affiliation: Department of Neurology, Northestern University
+  - given-names: Scott
+    family-names: Linderman
+    affiliation: Department of Statistics, Stanford University
+cff-version: 1.2.0
