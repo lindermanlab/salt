@@ -1,6 +1,9 @@
 title: Switching Autoregressive Low-Rank Tensor Models
 repository-code: https://github.com/lindermanlab/salt
 version: 1.0.0
+license: Apache-2.0
+journal: Conference on Neural Information Processing Systems (NeurIPS)
+issue-date: 2023
 date-released: 2023-12-08
 message: If you use this software, please cite it as below.
 authors:
