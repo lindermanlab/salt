@@ -1,0 +1,400 @@
+"""
+Model classes for SALT.
+"""
+
+import jax.numpy as np
+import jax.random as jr
+from jax import vmap, lax, jit
+import tensorflow_probability.substrates.jax as tfp
+tfd = tfp.distributions
+from jax.config import config
+config.update("jax_enable_x64", True)
+
+from jax.tree_util import register_pytree_node_class
+
+from ssm.arhmm.base import AutoregressiveHMM
+from ssm.hmm.initial import StandardInitialCondition
+from ssm.hmm.transitions import StationaryTransitions#, StickyTransitions
+from ssm.arhmm.emissions import AutoregressiveEmissions
+
+from salt.emissions import SALTEmissions
+
+supported_modes = ['cp', 'tucker']
+
+@register_pytree_node_class
+class SALT(AutoregressiveHMM):
+    def __init__(self,
+                 num_states: int,
+                 num_emission_dims: int=None,
+                 num_lags: int=None,
+                 core_tensor_dims: tuple=(1, 1, 1), # output, input, lag
+                 initial_state_probs: np.ndarray=None,
+                 transition_matrix: np.ndarray=None,
+                 emission_output_factors: np.ndarray=None,
+                 emission_input_factors: np.ndarray=None,
+                 emission_lag_factors: np.ndarray=None,
+                 emission_core_tensors: np.ndarray=None,
+                 emission_lowD_dynamics: np.ndarray=None,
+                 emission_biases: np.ndarray=None,
+                 emission_covariance_matrix_sqrts: np.ndarray=None,
+                 lowD_biases: np.ndarray=None,
+                 seed: jr.PRNGKey=None,
+                 mode: str='cp',
+                 single_subspace: bool=False,
+                 init_data: np.ndarray=None,
+                 l2_penalty: float=1e-4,
+                 temporal_penalty: float=1.0, # should be >=1
+                 separate_diag: bool=False,
+                 sticky_params: tuple=None,
+                 dtype=np.float64):
+        r"""Switching Autoregressive Low-rank Tensor Model (SALT).
+        ############
+        TODO: Fix me
+        ############
+        
+        Let $x_t$ denote the observation at time $t$.  Let $z_t$ denote the corresponding discrete latent state.
+        The autoregressive hidden Markov model (with ..math`\text{lag}=1`) has the following likelihood,
+
+        .. math::
+            x_t \mid x_{t-1}, z_t \sim \mathcal{N}\left(A_{z_t} x_{t-1} + b_{z_t}, Q_{z_t} \right).
+
+        The GaussianARHMM can be initialized by specifying each parameter explicitly,
+        or you can simply specify the ``num_states``, ``num_emission_dims``, ``num_lags``, and ``seed``
+        to create a GaussianARHMM with generic, randomly initialized parameters.
+
+        Args:
+            num_states (int): number of discrete latent states
+            num_emission_dims (int, optional): number of emission dims.
+                Defaults to None.
+            num_lags (int, optional): number of previous timesteps on which to autoregress.
+                Defaults to None.
+            initial_state_probs (np.ndarray, optional): initial state probabilities
+                with shape :math:`(\text{num\_states},)`. Defaults to None.
+            transition_matrix (np.ndarray, optional): transition matrix
+                with shape :math:`(\text{num\_states}, \text{num\_states})`. Defaults to None.
+            emission_biases (np.ndarray, optional): emission biases ..math`b_{z_t}`
+                with shape :math:`(\text{num\_states}, \text{emissions\_dim})`. Defaults to None.
+            emission_covariance_matrix_sqrts (np.ndarray, optional): emission covariance ..math`Q_{z_t}`
+                with shape :math:`(\text{num\_states}, \text{emissions\_dim}, \text{emissions\_dim})`.
+                Defaults to None.
+            seed (jr.PRNGKey, optional): random seed. Defaults to None.
+        """
+        
+        assert temporal_penalty >= 1.0 and l2_penalty >= 0, "Invalid penalty"
+        
+        mode = mode.lower()
+        if mode not in supported_modes:
+            raise ValueError(
+                f"'mode' should be from {supported_modes}"
+            )
+        if mode == "cp":
+            if not (core_tensor_dims[0] == core_tensor_dims[1] == core_tensor_dims[2]):
+                raise ValueError(
+                    f"'core_tensor_dims' should have same dimensions for mode {mode}"
+                )
+
+        if initial_state_probs is None:
+            initial_state_probs = np.ones(num_states).astype(dtype) / num_states
+
+        if sticky_params is None:
+            transition_matrix = np.ones((num_states, num_states)).astype(dtype) / num_states
+        else:
+            alpha, kappa = sticky_params
+            transition_matrix = kappa * np.eye(num_states) + alpha * np.ones((num_states, num_states))
+            transition_matrix /= (kappa + alpha * num_states)
+            
+        if separate_diag:
+            diag = np.tile(np.eye(num_emission_dims), (num_states, 1, 1)).astype(dtype)
+        else:
+            diag = np.tile(np.zeros((num_emission_dims, num_emission_dims)), (num_states, 1, 1)).astype(dtype)
+            
+        if init_data is None:
+            if emission_output_factors is None:
+                this_seed, seed = jr.split(seed, 2)
+                if single_subspace:
+                    emission_output_factors_shape = (num_emission_dims, core_tensor_dims[0])
+                else:
+                    emission_output_factors_shape = (num_states, num_emission_dims, core_tensor_dims[0])
+                emission_output_factors = tfd.Normal(0, 1).sample(
+                    seed=this_seed,
+                    sample_shape=emission_output_factors_shape).astype(dtype)
+
+            if emission_input_factors is None:
+                this_seed, seed = jr.split(seed, 2)
+                emission_input_factors = tfd.Normal(0, 1).sample(
+                    seed=this_seed,
+                    sample_shape=(num_states, num_emission_dims, core_tensor_dims[1])).astype(dtype)
+
+            if emission_lag_factors is None:
+                this_seed, seed = jr.split(seed, 2)
+                emission_lag_factors = tfd.Normal(0, 1).sample(
+                    seed=this_seed,
+                    sample_shape=(num_states, num_lags, core_tensor_dims[2])).astype(dtype)
+
+            if emission_core_tensors is None:
+                if mode == 'tucker':
+                    this_seed, seed = jr.split(seed, 2)
+                    emission_core_tensors = tfd.Normal(0, 1).sample(
+                        seed=this_seed,
+                        sample_shape=(num_states,) + core_tensor_dims).astype(dtype)
+                elif mode == 'cp':
+                    idx = np.arange(core_tensor_dims[1])
+                    emission_core_tensors = np.zeros((num_states,) + core_tensor_dims).astype(dtype)
+                    emission_core_tensors = emission_core_tensors.at[:,idx,idx,idx].set(1)
+
+            if emission_lowD_dynamics is None:
+                if single_subspace:
+                    this_seed, seed = jr.split(seed, 2)
+                    emission_lowD_dynamics = tfd.Normal(0, 1).sample(seed=this_seed,
+                        sample_shape=(num_states, core_tensor_dims[0], core_tensor_dims[0])).astype(dtype)
+                else:
+                    emission_lowD_dynamics = np.tile(np.eye(core_tensor_dims[0])[None],
+                                                      (num_states, 1, 1)).astype(dtype)
+
+            if emission_biases is None:
+                if single_subspace:
+                    emission_biases_shape = (num_emission_dims,)
+                else:
+                    emission_biases_shape = (num_states, num_emission_dims)
+
+                this_seed, seed = jr.split(seed, 2)
+                emission_biases = tfd.Normal(0, 1).sample(
+                    seed=this_seed,
+                    sample_shape=emission_biases_shape).astype(dtype)
+
+            if lowD_biases is None:
+                if single_subspace:
+                    this_seed, seed = jr.split(seed, 2)
+                    lowD_biases = tfd.Normal(0, 1).sample(
+                        seed=this_seed,
+                        sample_shape=(num_states, core_tensor_dims[0])).astype(dtype)
+                else:
+                    lowD_biases = np.zeros((num_states, core_tensor_dims[0])).astype(dtype)
+
+            if emission_covariance_matrix_sqrts is None:
+                emission_covariance_matrix_sqrts = np.tile(np.eye(num_emission_dims), (num_states, 1, 1)).astype(dtype)
+                
+        else:
+            # needs update (single subspace not supported)
+            params_initialized_with_data = self._initialize_with_data(init_data, 
+                                                                     num_states, 
+                                                                     num_emission_dims, 
+                                                                     num_lags, 
+                                                                     core_tensor_dims, 
+                                                                     constrained,
+                                                                     alpha,
+                                                                     seed)
+            emission_output_factors = params_initialized_with_data[0]
+            emission_input_factors = params_initialized_with_data[1]
+            emission_lag_factors = params_initialized_with_data[2]
+            emission_core_tensors = params_initialized_with_data[3]
+            emission_biases = params_initialized_with_data[4]
+            emission_covariance_matrix_sqrts = params_initialized_with_data[5]
+
+        initial_condition = StandardInitialCondition(num_states, initial_probs=initial_state_probs)
+        if sticky_params is None:
+            transitions = StationaryTransitions(num_states, transition_matrix=transition_matrix)
+        #else:
+        #    transitions = StickyTransitions(num_states, alpha=alpha, kappa=kappa, transition_matrix=transition_matrix)
+        emissions = SALTEmissions(num_states,
+                                  mode,
+                                  single_subspace=single_subspace,
+                                  l2_penalty=l2_penalty,
+                                  temporal_penalty=temporal_penalty,
+                                  separate_diag=separate_diag,
+                                  output_factors=emission_output_factors,
+                                  input_factors=emission_input_factors,
+                                  lag_factors=emission_lag_factors,
+                                  core_tensors=emission_core_tensors,
+                                  lowD_dynamics=emission_lowD_dynamics,
+                                  biases=emission_biases,
+                                  lowD_biases=lowD_biases,
+                                  diag=diag,
+                                  covariance_matrix_sqrts=emission_covariance_matrix_sqrts)
+        super(SALT, self).__init__(num_states,
+                                   initial_condition,
+                                   transitions,
+                                   emissions)
+        
+    def reinitialize(self,
+                     seed: jr.PRNGKey=None):
+
+        mode = self._emissions.mode
+        l2_penalty = self._emissions.l2_penalty
+        temporal_penalty = self._emissions.temporal_penalty
+        num_states = self._emissions.num_states
+        num_emission_dims = self._emissions.emissions_dim
+        core_tensor_dims = self._emissions.core_tensor_dims
+        num_lags = self._emissions.num_lags
+        dtype = self._emissions.output_factors.dtype
+
+        initial_state_probs = np.ones(num_states).astype(dtype) / num_states
+
+#         this_seed, seed = jr.split(seed, 2)
+#         transition_matrix = .95 * np.eye(num_states) + .05 * jr.uniform(this_seed, shape=(num_states, num_states))
+#         transition_matrix = transition_matrix.at[:].set(transition_matrix/transition_matrix.sum(axis=1, keepdims=True))
+
+        transition_matrix = np.ones((num_states, num_states)).astype(dtype) / num_states
+
+        this_seed, seed = jr.split(seed, 2)
+        emission_output_factors = tfd.Normal(0, 1).sample(
+            seed=this_seed,
+            sample_shape=(num_states, num_emission_dims, core_tensor_dims[0])).astype(dtype)
+
+        this_seed, seed = jr.split(seed, 2)
+        emission_input_factors = tfd.Normal(0, 1).sample(
+            seed=this_seed,
+            sample_shape=(num_states, num_emission_dims, core_tensor_dims[1])).astype(dtype)
+
+        this_seed, seed = jr.split(seed, 2)
+        emission_lag_factors = tfd.Normal(0, 1).sample(
+            seed=this_seed,
+            sample_shape=(num_states, num_lags, core_tensor_dims[2])).astype(dtype)
+
+        if mode == 'tucker':
+            this_seed, seed = jr.split(seed, 2)
+            emission_core_tensors = tfd.Normal(0, 1).sample(
+                seed=this_seed,
+                sample_shape=(num_states,) + core_tensor_dims).astype(dtype)
+        elif mode == 'cp':
+            idx = np.arange(core_tensor_dims[1])
+            emission_core_tensors = np.zeros((num_states,) + core_tensor_dims).astype(dtype)
+            emission_core_tensors = emission_core_tensors.at[:,idx,idx,idx].set(1)
+
+        this_seed, seed = jr.split(seed, 2)
+        emission_biases = tfd.Normal(0, 1).sample(
+            seed=this_seed,
+            sample_shape=(num_states, num_emission_dims)).astype(dtype)
+
+        emission_covariance_matrix_sqrts = np.tile(np.eye(num_emission_dims), (num_states, 1, 1)).astype(dtype)
+                
+        initial_condition = StandardInitialCondition(num_states, initial_probs=initial_state_probs)
+        transitions = StationaryTransitions(num_states, transition_matrix=transition_matrix)
+        emissions = SALTEmissions(num_states,
+                                  mode,
+                                  l2_penalty=l2_penalty,
+                                  temporal_penalty=temporal_penalty,
+                                  input_factors=emission_input_factors,
+                                  output_factors=emission_output_factors,
+                                  lag_factors=emission_lag_factors,
+                                  core_tensors=emission_core_tensors,
+                                  biases=emission_biases,
+                                  covariance_matrix_sqrts=emission_covariance_matrix_sqrts)
+        super(SALT, self).__init__(num_states,
+                                   initial_condition,
+                                   transitions,
+                                   emissions)
+        
+    def _initialize_with_data(self,
+                             data, 
+                             num_states,
+                             num_emission_dims, 
+                             num_lags, 
+                             core_tensor_dims, 
+                             constrained,
+                             alpha,
+                             seed):
+        
+        D1, D2, D3 = core_tensor_dims
+        
+        emission_output_factors = np.zeros((num_states, num_emission_dims, core_tensor_dims[0])).astype(np.float64)
+        emission_input_factors = np.zeros((num_states, num_emission_dims, core_tensor_dims[1])).astype(np.float64)
+        emission_lag_factors = np.zeros((num_states, num_lags, core_tensor_dims[2])).astype(np.float64)
+        emission_core_tensors = np.zeros((num_states,) + core_tensor_dims).astype(np.float64)
+        emission_biases = np.zeros((num_states, num_emission_dims)).astype(np.float64)
+        emission_covariance_matrix_sqrts = np.zeros((num_states, num_emission_dims, num_emission_dims)).astype(np.float64)
+        
+        # run K-means
+        from sklearn.cluster import KMeans
+        from sklearn.linear_model import LinearRegression, Ridge
+        km = KMeans(num_states)
+        assignments = km.fit_predict(data).reshape(data.shape[:-1])[num_lags:]
+        
+        def _get_X(t):
+            history = lax.dynamic_slice(data,
+                                        (t, 0),
+                                        (num_lags, num_emission_dims))
+            return history
+        
+        # tensor regression -> tensors + biases
+        for k in range(num_states):
+            kidx = np.where(assignments == k)[0]
+            X = vmap(_get_X)(kidx) # (T_k, L, N)
+            X_reshaped = X.reshape(kidx.shape[0], -1) # (T_k, L*N)
+            Y = data[kidx+num_lags] # (T_k, N)
+            if alpha > 0:
+                res = Ridge(alpha).fit(X_reshaped, Y)
+            else:
+                res = LinearRegression().fit(X_reshaped, Y)
+                                                    
+            weight = res.coef_.reshape(num_emission_dims, num_lags, num_emission_dims) # N, L, N
+            weight = np.transpose(weight, [0,2,1]) # N, N, L
+            
+            this_seed, seed = jr.split(seed, 2)
+            weight_noise = tfd.Normal(0, 1).sample(
+                                    seed=this_seed,
+                                    sample_shape=weight.shape).astype(np.float64) / np.sqrt(kidx.shape[0])
+            
+            weight += weight_noise
+
+            if constrained:
+                # CP
+                from tensorly.decomposition import parafac
+                _, factors = parafac(weight, core_tensor_dims[0])
+
+                core = np.eye(D1)
+                emission_core_tensors = emission_core_tensors.at[k,:,np.arange(D2),np.arange(D3)].set(core)
+                
+            else:
+                # Tucker
+                from tensorly.decomposition import tucker
+                core, factors = tucker(weight, core_tensor_dims)
+                
+                emission_core_tensors = emission_core_tensors.at[k].set(core)
+
+            emission_output_factors = emission_output_factors.at[k].set(factors[0])
+            emission_input_factors = emission_input_factors.at[k].set(factors[1])
+            emission_lag_factors = emission_lag_factors.at[k].set(factors[2])
+            
+            this_seed, seed = jr.split(seed, 2)
+            bias_noise = tfd.Normal(0, 1).sample(
+                                    seed=this_seed,
+                                    sample_shape=res.intercept_.shape).astype(np.float64) / np.sqrt(kidx.shape[0])
+            emission_biases = emission_biases.at[k].set(res.intercept_+bias_noise)
+            
+            yhat = np.einsum('abc,ia,jb,kc,tkj->ti',
+                             emission_core_tensors[k],
+                             emission_output_factors[k],
+                             emission_input_factors[k],
+                             emission_lag_factors[k],
+                             X)
+            yhat += emission_biases[k]
+            
+            covariance_matrix = np.cov(Y - yhat, rowvar=False, bias=True)
+            covariance_matrix_sqrts = np.linalg.cholesky(covariance_matrix)
+            emission_covariance_matrix_sqrts = emission_covariance_matrix_sqrts.at[k].set(covariance_matrix_sqrts)
+            
+        return (emission_output_factors, 
+                emission_input_factors, 
+                emission_lag_factors, 
+                emission_core_tensors, 
+                emission_biases, 
+                emission_covariance_matrix_sqrts)
+
+    @property
+    def num_lags(self):
+        return self._emissions.num_lags
+
+    def tree_flatten(self):
+        children = (self._initial_condition,
+                    self._transitions,
+                    self._emissions)
+        aux_data = self._num_states
+        return children, aux_data
+
+    # directly SALT using parent (HMM) constructor
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        obj = object.__new__(cls)
+        super(cls, obj).__init__(aux_data, *children)
+        return obj
