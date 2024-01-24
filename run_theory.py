@@ -10,7 +10,7 @@ env_args = {
     'seed': 0,
     'use_wandb': True,
     'wandb_project': 'salt-theory',
-    'wandb_entity': 'jhdlee',
+    'wandb_entity': '', # your wandb id
 }
 
 # Set up experimental logging.

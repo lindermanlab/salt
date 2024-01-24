@@ -49,35 +49,8 @@ class SALT(AutoregressiveHMM):
                  dtype=np.float64):
         r"""Switching Autoregressive Low-rank Tensor Model (SALT).
         ############
-        TODO: Fix me
-        ############
-        
-        Let $x_t$ denote the observation at time $t$.  Let $z_t$ denote the corresponding discrete latent state.
-        The autoregressive hidden Markov model (with ..math`\text{lag}=1`) has the following likelihood,
-
-        .. math::
-            x_t \mid x_{t-1}, z_t \sim \mathcal{N}\left(A_{z_t} x_{t-1} + b_{z_t}, Q_{z_t} \right).
-
-        The GaussianARHMM can be initialized by specifying each parameter explicitly,
-        or you can simply specify the ``num_states``, ``num_emission_dims``, ``num_lags``, and ``seed``
-        to create a GaussianARHMM with generic, randomly initialized parameters.
-
-        Args:
-            num_states (int): number of discrete latent states
-            num_emission_dims (int, optional): number of emission dims.
-                Defaults to None.
-            num_lags (int, optional): number of previous timesteps on which to autoregress.
-                Defaults to None.
-            initial_state_probs (np.ndarray, optional): initial state probabilities
-                with shape :math:`(\text{num\_states},)`. Defaults to None.
-            transition_matrix (np.ndarray, optional): transition matrix
-                with shape :math:`(\text{num\_states}, \text{num\_states})`. Defaults to None.
-            emission_biases (np.ndarray, optional): emission biases ..math`b_{z_t}`
-                with shape :math:`(\text{num\_states}, \text{emissions\_dim})`. Defaults to None.
-            emission_covariance_matrix_sqrts (np.ndarray, optional): emission covariance ..math`Q_{z_t}`
-                with shape :math:`(\text{num\_states}, \text{emissions\_dim}, \text{emissions\_dim})`.
-                Defaults to None.
-            seed (jr.PRNGKey, optional): random seed. Defaults to None.
+        TODO
+        ############ 
         """
         
         assert temporal_penalty >= 1.0 and l2_penalty >= 0, "Invalid penalty"
