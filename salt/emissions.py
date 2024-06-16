@@ -166,7 +166,7 @@ class SALTEmissions(Emissions):
             mean += biases
         
         log_probs = tfd.MultivariateNormalTriL(mean, scale_trils).log_prob(data[num_lags:, None, :])
-        log_probs = np.row_stack([np.zeros((num_lags, num_states)), log_probs])
+        log_probs = np.vstack([np.zeros((num_lags, num_states)), log_probs])
         return log_probs
     
 #     def update_core_tensors(self, dataset, Y, conv, Ez, Qinvs, mode):
@@ -714,7 +714,7 @@ class SALTEmissions(Emissions):
     
     def m_step(self,
                dataset: np.ndarray,
-               posterior: StationaryHMMPosterior,
+               posterior, #: StationaryHMMPosterior,
                covariates=None,
                metadata=None):
         r"""Update the distribution with an M step.
@@ -735,7 +735,7 @@ class SALTEmissions(Emissions):
         D1, D2, D3 = self.core_tensor_dims
         mode = self.mode
         
-        Ez = posterior.expected_states[:,num_lags:] # B, T-L, K
+        Ez = posterior['expected_states'][:,num_lags:] # B, T-L, K
         Qs = np.einsum('kab,kcb->kac', 
                 self.covariance_matrix_sqrts, 
                 self.covariance_matrix_sqrts)
