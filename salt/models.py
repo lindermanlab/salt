@@ -15,7 +15,7 @@ from jax.tree_util import register_pytree_node_class
 
 from ssm.arhmm.base import AutoregressiveHMM
 from ssm.hmm.initial import StandardInitialCondition
-from ssm.hmm.transitions import StationaryTransitions#, StickyTransitions
+from ssm.hmm.transitions import StationaryTransitions, StickyTransitions
 from ssm.arhmm.emissions import AutoregressiveEmissions
 
 from salt.emissions import SALTEmissions
@@ -40,6 +40,7 @@ class SALT(AutoregressiveHMM):
                  emission_lowD_dynamics: jnp.ndarray=None,
                  emission_biases: jnp.ndarray=None,
                  emission_covariance_matrix_sqrts: jnp.ndarray=None,
+                 diag_cov: bool=False,
                  lowD_biases: jnp.ndarray=None,
                  seed: jr.PRNGKey=None,
                  mode: str='cp',
@@ -47,7 +48,6 @@ class SALT(AutoregressiveHMM):
                  init_data: jnp.ndarray=None,
                  l2_penalty: float=1e-4,
                  temporal_penalty: float=1.0, # should be >=1
-                 separate_diag: bool=False,
                  sticky_params: tuple=None,
                  dtype=jnp.float64):
         r"""Switching Autoregressive Low-rank Tensor Model (SALT).
@@ -79,11 +79,6 @@ class SALT(AutoregressiveHMM):
                 alpha, kappa = sticky_params
                 transition_matrix = kappa * jnp.eye(num_states) + alpha * jnp.ones((num_states, num_states))
                 transition_matrix /= (kappa + alpha * num_states)
-            
-        if separate_diag:
-            diag = jnp.tile(jnp.eye(num_emission_dims), (num_states, 1, 1)).astype(dtype)
-        else:
-            diag = jnp.tile(jnp.zeros((num_emission_dims, num_emission_dims)), (num_states, 1, 1)).astype(dtype)
             
         if init_data is None:
             if emission_output_factors is None:
@@ -186,14 +181,14 @@ class SALT(AutoregressiveHMM):
         initial_condition = StandardInitialCondition(num_states, initial_probs=initial_state_probs)
         if sticky_params is None:
             transitions = StationaryTransitions(num_states, transition_matrix=transition_matrix)
-        #else:
-        #    transitions = StickyTransitions(num_states, alpha=alpha, kappa=kappa, transition_matrix=transition_matrix)
+        else:
+           transitions = StickyTransitions(num_states, alpha=alpha, kappa=kappa, transition_matrix=transition_matrix)
         emissions = SALTEmissions(num_states,
                                   mode,
                                   single_subspace=single_subspace,
+                                  diag_cov=diag_cov,
                                   l2_penalty=l2_penalty,
                                   temporal_penalty=temporal_penalty,
-                                  separate_diag=separate_diag,
                                   output_factors=emission_output_factors,
                                   input_factors=emission_input_factors,
                                   lag_factors=emission_lag_factors,
@@ -201,72 +196,6 @@ class SALT(AutoregressiveHMM):
                                   lowD_dynamics=emission_lowD_dynamics,
                                   biases=emission_biases,
                                   lowD_biases=lowD_biases,
-                                  diag=diag,
-                                  covariance_matrix_sqrts=emission_covariance_matrix_sqrts)
-        super(SALT, self).__init__(num_states,
-                                   initial_condition,
-                                   transitions,
-                                   emissions)
-        
-    def reinitialize(self,
-                     seed: jr.PRNGKey=None):
-
-        mode = self._emissions.mode
-        l2_penalty = self._emissions.l2_penalty
-        temporal_penalty = self._emissions.temporal_penalty
-        num_states = self._emissions.num_states
-        num_emission_dims = self._emissions.emissions_dim
-        core_tensor_dims = self._emissions.core_tensor_dims
-        num_lags = self._emissions.num_lags
-        dtype = self._emissions.output_factors.dtype
-
-        initial_state_probs = jnp.ones(num_states).astype(dtype) / num_states
-
-        transition_matrix = jnp.ones((num_states, num_states)).astype(dtype) / num_states
-
-        this_seed, seed = jr.split(seed, 2)
-        emission_output_factors = tfd.Normal(0, 1).sample(
-            seed=this_seed,
-            sample_shape=(num_states, num_emission_dims, core_tensor_dims[0])).astype(dtype)
-
-        this_seed, seed = jr.split(seed, 2)
-        emission_input_factors = tfd.Normal(0, 1).sample(
-            seed=this_seed,
-            sample_shape=(num_states, num_emission_dims, core_tensor_dims[1])).astype(dtype)
-
-        this_seed, seed = jr.split(seed, 2)
-        emission_lag_factors = tfd.Normal(0, 1).sample(
-            seed=this_seed,
-            sample_shape=(num_states, num_lags, core_tensor_dims[2])).astype(dtype)
-
-        if mode == 'tucker':
-            this_seed, seed = jr.split(seed, 2)
-            emission_core_tensors = tfd.Normal(0, 1).sample(
-                seed=this_seed,
-                sample_shape=(num_states,) + core_tensor_dims).astype(dtype)
-        elif mode == 'cp':
-            idx = jnp.arange(core_tensor_dims[1])
-            emission_core_tensors = jnp.zeros((num_states,) + core_tensor_dims).astype(dtype)
-            emission_core_tensors = emission_core_tensors.at[:,idx,idx,idx].set(1)
-
-        this_seed, seed = jr.split(seed, 2)
-        emission_biases = tfd.Normal(0, 1).sample(
-            seed=this_seed,
-            sample_shape=(num_states, num_emission_dims)).astype(dtype)
-
-        emission_covariance_matrix_sqrts = jnp.tile(jnp.eye(num_emission_dims), (num_states, 1, 1)).astype(dtype)
-                
-        initial_condition = StandardInitialCondition(num_states, initial_probs=initial_state_probs)
-        transitions = StationaryTransitions(num_states, transition_matrix=transition_matrix)
-        emissions = SALTEmissions(num_states,
-                                  mode,
-                                  l2_penalty=l2_penalty,
-                                  temporal_penalty=temporal_penalty,
-                                  input_factors=emission_input_factors,
-                                  output_factors=emission_output_factors,
-                                  lag_factors=emission_lag_factors,
-                                  core_tensors=emission_core_tensors,
-                                  biases=emission_biases,
                                   covariance_matrix_sqrts=emission_covariance_matrix_sqrts)
         super(SALT, self).__init__(num_states,
                                    initial_condition,
